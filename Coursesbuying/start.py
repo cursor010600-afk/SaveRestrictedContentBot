@@ -68,12 +68,17 @@ async def _get_user_word_rules(user_id: int):
     return delete_words or [], replace_words or {}
 
 
-async def _get_effective_thumbnail_path(user_id: int, source_client, temp_dir: str, source_thumb=None):
+async def _get_effective_thumbnail_path(user_id: int, bot_client, temp_dir: str, source_thumb=None):
     custom_thumb = await db.get_thumbnail(user_id)
     if custom_thumb:
         try:
             os.makedirs(temp_dir, exist_ok=True)
-            return await source_client.download_media(custom_thumb, file_name=f"{temp_dir}/thumb_")
+            thumb_path = os.path.join(temp_dir, f"thumb_{user_id}.jpg")
+            downloaded_path = await bot_client.download_media(custom_thumb, file_name=thumb_path)
+            if downloaded_path and os.path.exists(downloaded_path) and os.path.getsize(downloaded_path) > 0:
+                return downloaded_path
+            if downloaded_path and os.path.exists(downloaded_path):
+                os.remove(downloaded_path)
         except Exception as e:
             logger.error(f"Custom thumbnail download failed: {e}")
     return source_thumb
@@ -612,7 +617,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     caption = msg.caption if msg.caption else None
     caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
     source_client = acc if acc else client
-    effective_thumb = await _get_effective_thumbnail_path(message.from_user.id, source_client, temp_dir)
+    effective_thumb = await _get_effective_thumbnail_path(message.from_user.id, client, temp_dir)
     
     if batch_temp.IS_BATCH.get(message.from_user.id):
          # Cleanup if cancelled during gap
