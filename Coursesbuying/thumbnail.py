@@ -8,11 +8,25 @@ from database.db import db
 
 @Client.on_message(filters.command("set_thumb") & filters.private)
 async def set_thumb(client: Client, message: Message):
-    if not message.reply_to_message or not message.reply_to_message.photo:
-        return await message.reply_text("**__Reply to a photo to set it as custom thumbnail.__**")
+    source_message = None
+    if message.photo:
+        source_message = message
+    elif message.reply_to_message and (message.reply_to_message.photo or getattr(message.reply_to_message, "document", None)):
+        source_message = message.reply_to_message
+
+    if not source_message:
+        return await message.reply_text(
+            "**__Send a photo with /set_thumb or reply to a photo with /set_thumb.__**"
+        )
 
     try:
-        file_id = message.reply_to_message.photo.file_id
+        if getattr(source_message, "photo", None):
+            file_id = source_message.photo.file_id
+        elif getattr(source_message, "document", None) and getattr(source_message.document, "mime_type", "").startswith("image/"):
+            file_id = source_message.document.file_id
+        else:
+            return await message.reply_text("**__Please use a normal photo or image file.__**")
+
         if not file_id:
             return await message.reply_text("**__Could not read the photo file_id. Try again with a normal photo message.__**")
 
