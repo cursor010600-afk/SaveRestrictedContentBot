@@ -9,6 +9,7 @@ import asyncio
 import random
 import time
 import shutil
+import re
 import pyrogram
 from pyrogram import Client, filters, enums
 from pyrogram.errors import (
@@ -16,6 +17,7 @@ from pyrogram.errors import (
     InviteHashExpired, UsernameNotOccupied, AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from urllib.parse import unquote
 from config import API_ID, API_HASH, ERROR_MESSAGE
 from database.db import db
 import math
@@ -50,8 +52,156 @@ def TimeFormatter(milliseconds: int) -> str:
 
 logger = LOGGER(__name__)
 
+BOT_DEEPLINK_RE = re.compile(r'^(?:https?://)?t\.me/[^/?]+\?start=(?P<payload>.+)$', re.I)
+PUBLIC_LINK_RE = re.compile(r'^(?:https?://)?t\.me/(?P<chat>[A-Za-z0-9_]+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
+PRIVATE_LINK_RE = re.compile(r'^(?:https?://)?t\.me/c/(?P<chat>\d+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
+BATCH_LINK_RE = re.compile(r'^(?:https?://)?t\.me/b/(?P<chat>[A-Za-z0-9_]+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
+SHORT_RANGE_RE = re.compile(r'^(?P<start>\d+)(?:-(?P<end>\d+))?$', re.I)
+
 class batch_temp(object):
     IS_BATCH = {}
+
+
+def _normalize_reference_text(text: str) -> str:
+    text = unquote((text or '').strip())
+    text = text.replace('https://', '').replace('http://', '')
+    if text.startswith('telegram.me/'):
+        text = 't.me/' + text[len('telegram.me/'):]
+    return text
+
+
+async def _resolve_reference(message: Message, text: str):
+    """Resolve deep links, public/private Telegram links, and short bulk ranges."""
+    normalized = _normalize_reference_text(text)
+
+    deep_link = BOT_DEEPLINK_RE.match(normalized)
+    if deep_link:
+        normalized = _normalize_reference_text(deep_link.group('payload'))
+
+    if normalized.startswith('t.me/'):
+        normalized = normalized[5:]
+
+    match = PRIVATE_LINK_RE.match(f't.me/{normalized}')
+    if match:
+        start_id = int(match.group('start'))
+        end_id = int(match.group('end') or match.group('start'))
+        return {
+            'kind': 'private',
+            'chat': int(f"-100{match.group('chat')}"),
+            'start': start_id,
+            'end': end_id,
+        }
+
+    match = BATCH_LINK_RE.match(f't.me/{normalized}')
+    if match:
+        start_id = int(match.group('start'))
+        end_id = int(match.group('end') or match.group('start'))
+        return {
+            'kind': 'batch',
+            'chat': match.group('chat'),
+            'start': start_id,
+            'end': end_id,
+        }
+
+    match = PUBLIC_LINK_RE.match(f't.me/{normalized}')
+    if match:
+        start_id = int(match.group('start'))
+        end_id = int(match.group('end') or match.group('start'))
+        return {
+            'kind': 'public',
+            'chat': match.group('chat'),
+            'start': start_id,
+            'end': end_id,
+        }
+
+    match = SHORT_RANGE_RE.match(normalized)
+    if match:
+        last_chat = await db.get_last_chat(message.from_user.id)
+        if last_chat:
+            start_id = int(match.group('start'))
+            end_id = int(match.group('end') or match.group('start'))
+            return {
+                'kind': last_chat.get('kind', 'public'),
+                'chat': last_chat.get('chat'),
+                'start': start_id,
+                'end': end_id,
+            }
+
+    return None
+
+
+async def _process_reference(client: Client, message: Message, reference: dict):
+    if not await db.is_user_exist(message.from_user.id):
+        await db.add_user(message.from_user.id, message.from_user.first_name)
+
+    start_id = reference['start']
+    end_id = reference['end']
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
+
+    await db.set_last_chat(message.from_user.id, {'kind': reference['kind'], 'chat': reference['chat']})
+
+    if batch_temp.IS_BATCH.get(message.from_user.id) == False:
+        return await message.reply_text(
+            'One Task Is Already Processing. Wait For Complete It. If You Want To Cancel This Task Then Use - /cancel'
+        )
+
+    batch_temp.IS_BATCH[message.from_user.id] = False
+
+    chat_ref = reference['chat']
+    source_kind = reference['kind']
+
+    for msgid in range(start_id, end_id + 1):
+        if batch_temp.IS_BATCH.get(message.from_user.id):
+            break
+
+        if source_kind == 'public':
+            try:
+                msg = await client.get_messages(chat_ref, msgid)
+                await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                await asyncio.sleep(1)
+                continue
+            except Exception as e:
+                logger.error(f"Public copy failed for {chat_ref}/{msgid}: {e}")
+
+        user_data = await db.get_session(message.from_user.id)
+        if user_data is None:
+            await message.reply('**__For Downloading Restricted Content You Have To /login First.__**')
+            batch_temp.IS_BATCH[message.from_user.id] = True
+            return
+
+        try:
+            acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
+            await acc.connect()
+        except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan) as e:
+            batch_temp.IS_BATCH[message.from_user.id] = True
+            await db.set_session(message.from_user.id, None)
+            return await message.reply(f"**__Your Login Session Invalid/Expired. Please /login again.__**\nError: {e}")
+        except Exception:
+            batch_temp.IS_BATCH[message.from_user.id] = True
+            return await message.reply("**__Your Login Session Error. So /logout First Then Login Again By - /login__**")
+
+        try:
+            if source_kind == 'private':
+                await handle_private(client, acc, message, chat_ref, msgid)
+            elif source_kind == 'batch':
+                await handle_private(client, acc, message, chat_ref, msgid)
+            else:
+                await handle_private(client, acc, message, chat_ref, msgid)
+        except Exception as e:
+            logger.error(f"Error handling reference: {e}")
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+        finally:
+            try:
+                await acc.disconnect()
+            except Exception:
+                pass
+
+        await asyncio.sleep(3)
+
+    batch_temp.IS_BATCH[message.from_user.id] = True
+    return True
 
 # -------------------
 # Supported Telegram Reactions
@@ -174,6 +324,14 @@ async def send_start(client: Client, message: Message):
     if not await db.is_user_exist(message.from_user.id):
         await db.add_user(message.from_user.id, message.from_user.first_name)
 
+    if len(message.command) > 1:
+        payload = unquote(" ".join(message.command[1:]).strip())
+        reference = await _resolve_reference(message, payload)
+        if reference:
+            processed = await _process_reference(client, message, reference)
+            if processed:
+                return
+
     buttons = [
         [
             InlineKeyboardButton("🆘 How To Use", callback_data="help_btn"),
@@ -197,7 +355,8 @@ async def send_start(client: Client, message: Message):
             "<blockquote><b>🚀 What I Can Do:</b>\n"
             "<b>‣ Save Restricted Post (Text, Media, Files)</b>\n"
             "<b>‣ Support Private & Public Channels</b>\n"
-            "<b>‣ Batch/Bulk Mode Supported</b></blockquote>\n\n"
+            f"<b>‣ Batch/Bulk Mode Supported</b>\n"
+            f"<b>‣ Deep Link Support Enabled</b></blockquote>\n\n"
             "<blockquote><b>⚠️ Note:</b> <i>You must <code>/login</code> to your account to use the downloading features.</i></blockquote>"
         ),
         reply_markup=reply_markup,
@@ -239,92 +398,9 @@ async def send_cancel(client: Client, message: Message):
 
 @Client.on_message(filters.text & filters.private & ~filters.regex("^/"))
 async def save(client: Client, message: Message):
-    if "https://t.me/" in message.text:
-        if batch_temp.IS_BATCH.get(message.from_user.id) == False:
-            return await message.reply_text(
-                "One Task Is Already Processing. Wait For Complete It. If You Want To Cancel This Task Then Use - /cancel"
-            )
-
-        datas = message.text.split("/")
-        temp = datas[-1].replace("?single", "").split("-")
-        fromID = int(temp[0].strip())
-        try:
-            toID = int(temp[1].strip())
-        except:
-            toID = fromID
-
-        batch_temp.IS_BATCH[message.from_user.id] = False
-
-        is_private = "https://t.me/c/" in message.text
-        is_batch = "https://t.me/b/" in message.text
-
-        for msgid in range(fromID, toID + 1):
-            if batch_temp.IS_BATCH.get(message.from_user.id):
-                break
-            
-            # 1. Try Public Copy (No Login Required)
-            if not is_private and not is_batch:
-                username = datas[3]
-                try:
-                    msg = await client.get_messages(username, msgid)
-                    await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                    await asyncio.sleep(1)
-                    continue
-                except Exception as e:
-                    logger.error(f"Public copy failed for {username}/{msgid}: {e}")
-                    pass # Fallback to login method
-            
-            # 2. Login Check
-            user_data = await db.get_session(message.from_user.id)
-            if user_data is None:
-                await message.reply("**__For Downloading Restricted Content You Have To /login First.__**")
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return
-
-            # 3. Connect User Client
-            try:
-                acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
-                await acc.connect()
-            except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan) as e:
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                await db.set_session(message.from_user.id, None)
-                return await message.reply(f"**__Your Login Session Invalid/Expired. Please /login again.__**\nError: {e}")
-            except Exception:
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return await message.reply("**__Your Login Session Error. So /logout First Then Login Again By - /login__**")
-
-            # 4. Handle Content
-            if is_private:
-                chatid = int("-100" + datas[4])
-                try:
-                    await handle_private(client, acc, message, chatid, msgid)
-                except Exception as e:
-                    logger.error(f"Error handling private chat: {e}")
-                    if ERROR_MESSAGE:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-
-            elif is_batch:
-                username = datas[4]
-                try:
-                    await handle_private(client, acc, message, username, msgid)
-                except Exception as e:
-                    logger.error(f"Error handling batch channel: {e}")
-                    if ERROR_MESSAGE:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-
-            else:
-                # Restricted Public Channel
-                username = datas[3]
-                try:
-                    await handle_private(client, acc, message, username, msgid)
-                except Exception as e:
-                    logger.error(f"Error copy/handle private: {e}")
-                    if ERROR_MESSAGE:
-                         await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-
-            await asyncio.sleep(3)
-
-        batch_temp.IS_BATCH[message.from_user.id] = True
+    reference = await _resolve_reference(message, message.text)
+    if reference:
+        await _process_reference(client, message, reference)
 
 # -------------------
 # Handle private content

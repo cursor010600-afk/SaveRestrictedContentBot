@@ -9,7 +9,8 @@ HELP_TXT = """<b>🛠 𝐇𝐨𝐰 𝐓𝐨 𝐔𝐬𝐞 𝐌𝐞 - 𝐂𝐨𝐦
 
 <blockquote><b>🚀 /start</b>
 Start the bot and check if it is working.
-<i>Usage: /start</i></blockquote>
+<i>Usage: /start</i>
+<i>Deep links with supported Telegram payloads are also processed automatically.</i></blockquote>
 
 <blockquote><b>🆘 /help</b>
 Get this help message with detailed instructions.
@@ -25,7 +26,9 @@ Logout from the current session.
 
 <blockquote><b>📦 /batch</b>
 Bulk save messages from a channel (Public/Private).
-<i>Usage: /batch</i></blockquote>
+<i>Usage: /batch</i>
+<i>Bulk ranges keep sequence order from first message to last message.</i>
+<i>Short ranges reuse the last resolved chat context.</i></blockquote>
 
 <blockquote><b>🛑 /cancel</b>
 Cancel any ongoing batch process.

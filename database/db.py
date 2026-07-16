@@ -49,7 +49,7 @@ class Database:
 
     async def get_session(self, id):
         user = await self.col.find_one({'id': int(id)})
-        return user.get('session')
+        return user.get('session') if user else None
 
     # Caption Support
     async def set_caption(self, id, caption):
@@ -113,7 +113,15 @@ class Database:
 
     async def get_dump_chat(self, id):
         user = await self.col.find_one({'id': int(id)})
-        return user.get('dump_chat', None)
+        return user.get('dump_chat', None) if user else None
+
+    # Last chat context support for short sequence links
+    async def set_last_chat(self, id, chat_ref):
+        await self.col.update_one({'id': int(id)}, {'$set': {'last_chat': chat_ref}})
+
+    async def get_last_chat(self, id):
+        user = await self.col.find_one({'id': int(id)})
+        return user.get('last_chat', None) if user else None
 
     # Delete/Replace Words Support
     async def set_delete_words(self, id, words):
