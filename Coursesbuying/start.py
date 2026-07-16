@@ -103,6 +103,21 @@ def _build_reply_markup(source_message: Message):
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 
+async def _get_custom_thumb_path(user_id: int, client: Client):
+    thumb_file_id = await db.get_thumbnail(user_id)
+    if not thumb_file_id:
+        return None
+
+    os.makedirs("thumbs", exist_ok=True)
+    thumb_path = f"thumbs/{user_id}.jpg"
+    try:
+        await client.download_media(thumb_file_id, file_name=thumb_path)
+        return thumb_path
+    except Exception as e:
+        logger.error(f"Failed to download custom thumbnail for {user_id}: {e}")
+        return None
+
+
 async def _process_reference(client: Client, message: Message, reference: dict):
     if not await db.is_user_exist(message.from_user.id):
         await db.add_user(message.from_user.id, message.from_user.first_name)
@@ -600,6 +615,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         logger.error(f"Error creating upload status task: {e}")
     caption = msg.caption if msg.caption else None
     caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
+    custom_thumb_path = await _get_custom_thumb_path(message.from_user.id, acc if acc else client)
     
     if batch_temp.IS_BATCH.get(message.from_user.id):
          # Cleanup if cancelled during gap
@@ -616,9 +632,12 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 ph_path = await (acc if acc else client).download_media(msg.document.thumbs[0].file_id)
             except:
                 ph_path = None
-            await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
+            thumb_for_upload = custom_thumb_path or ph_path
+            await client.send_document(chat, file, thumb=thumb_for_upload, caption=caption, reply_to_message_id=message.id,
                                        parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                        progress=progress, progress_args=[message, "up"])
+            if custom_thumb_path and os.path.exists(custom_thumb_path):
+                os.remove(custom_thumb_path)
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
@@ -627,11 +646,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 ph_path = await (acc if acc else client).download_media(msg.video.thumbs[0].file_id)
             except:
                 ph_path = None
+            thumb_for_upload = custom_thumb_path or ph_path
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
-                                    height=msg.video.height, thumb=ph_path, caption=caption,
+                                    height=msg.video.height, thumb=thumb_for_upload, caption=caption,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
+            if custom_thumb_path and os.path.exists(custom_thumb_path):
+                os.remove(custom_thumb_path)
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
@@ -654,9 +676,12 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 ph_path = await (acc if acc else client).download_media(msg.audio.thumbs[0].file_id)
             except:
                 ph_path = None
-            await client.send_audio(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
+            thumb_for_upload = custom_thumb_path or ph_path
+            await client.send_audio(chat, file, thumb=thumb_for_upload, caption=caption, reply_to_message_id=message.id,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                     progress=progress, progress_args=[message, "up"])
+            if custom_thumb_path and os.path.exists(custom_thumb_path):
+                os.remove(custom_thumb_path)
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
