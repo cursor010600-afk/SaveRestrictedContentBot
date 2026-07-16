@@ -84,6 +84,25 @@ def _apply_word_rules(text: str, delete_words, replace_words):
     return updated_text
 
 
+def _build_reply_markup(source_message: Message):
+    reply_markup = getattr(source_message, 'reply_markup', None)
+    if not reply_markup or not getattr(reply_markup, 'inline_keyboard', None):
+        return None
+
+    buttons = []
+    for row in reply_markup.inline_keyboard:
+        new_row = []
+        for button in row:
+            if getattr(button, 'url', None):
+                new_row.append(InlineKeyboardButton(button.text, url=button.url))
+            elif getattr(button, 'callback_data', None):
+                new_row.append(InlineKeyboardButton(button.text, callback_data=button.callback_data))
+        if new_row:
+            buttons.append(new_row)
+
+    return InlineKeyboardMarkup(buttons) if buttons else None
+
+
 async def _process_reference(client: Client, message: Message, reference: dict):
     if not await db.is_user_exist(message.from_user.id):
         await db.add_user(message.from_user.id, message.from_user.first_name)
@@ -193,7 +212,12 @@ async def _process_reference(client: Client, message: Message, reference: dict):
             if error_ids:
                 final_text += f"\n<b>Error IDs:</b> <code>{', '.join(map(str, error_ids[:15]))}</code>"
 
-        await status_message.edit_text(final_text, parse_mode=enums.ParseMode.HTML)
+        try:
+            await status_message.delete()
+        except Exception:
+            pass
+
+        await message.reply_text(final_text, parse_mode=enums.ParseMode.HTML)
         return {
             'status': 'cancelled' if batch_temp.IS_BATCH.get(message.from_user.id) else 'done',
             'sent': sent_count,
@@ -484,7 +508,22 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             text = _apply_word_rules(msg.text or "", delete_words, replace_words)
             if not text.strip():
                 return {"status": "missing"}
-            await client.send_message(chat, text, reply_to_message_id=message.id)
+            reply_markup = _build_reply_markup(msg)
+            if text == (msg.text or "") and getattr(msg, 'entities', None):
+                await client.send_message(
+                    chat,
+                    text,
+                    entities=msg.entities,
+                    reply_to_message_id=message.id,
+                    reply_markup=reply_markup,
+                )
+            else:
+                await client.send_message(
+                    chat,
+                    text,
+                    reply_to_message_id=message.id,
+                    reply_markup=reply_markup,
+                )
             return {"status": "sent"}
         except Exception as e:
             logger.error(f"Error sending text message: {e}")
@@ -578,8 +617,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             except:
                 ph_path = None
             await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
-                                       parse_mode=enums.ParseMode.HTML, progress=progress,
-                                       progress_args=[message, "up"])
+                                       parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
+                                       progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
@@ -591,20 +630,24 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
                                     height=msg.video.height, thumb=ph_path, caption=caption,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
-                                    progress=progress, progress_args=[message, "up"])
+                                    reply_markup=_build_reply_markup(msg), progress=progress,
+                                    progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Animation" == msg_type:
-            await client.send_animation(chat, file, caption=caption, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_animation(chat, file, caption=caption, reply_to_message_id=message.id,
+                                        parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
 
         elif "Sticker" == msg_type:
-            await client.send_sticker(chat, file, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_sticker(chat, file, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
+                                       reply_markup=_build_reply_markup(msg))
 
         elif "Voice" == msg_type:
             await client.send_voice(chat, file, caption=caption,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
-                                    progress=progress, progress_args=[message, "up"])
+                                    reply_markup=_build_reply_markup(msg), progress=progress,
+                                    progress_args=[message, "up"])
 
         elif "Audio" == msg_type:
             try:
@@ -612,14 +655,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             except:
                 ph_path = None
             await client.send_audio(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
-                                    parse_mode=enums.ParseMode.HTML, progress=progress,
-                                    progress_args=[message, "up"])
+                                    parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
+                                    progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Photo" == msg_type:
             await client.send_photo(chat, file, caption=caption, reply_to_message_id=message.id,
-                                    parse_mode=enums.ParseMode.HTML)
+                                    parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
     except Exception as e:
         # Check if cancelled (flag is True) or exception message contains "Cancelled"
         if batch_temp.IS_BATCH.get(message.from_user.id) or "Cancelled" in str(e):
