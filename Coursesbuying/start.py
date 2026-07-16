@@ -68,6 +68,11 @@ async def _get_user_word_rules(user_id: int):
     return delete_words or [], replace_words or {}
 
 
+async def _get_effective_thumbnail(user_id: int, source_thumb=None):
+    custom_thumb = await db.get_thumbnail(user_id)
+    return custom_thumb or source_thumb
+
+
 def _apply_word_rules(text: str, delete_words, replace_words):
     if not text:
         return text
@@ -600,6 +605,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         logger.error(f"Error creating upload status task: {e}")
     caption = msg.caption if msg.caption else None
     caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
+    effective_thumb = await _get_effective_thumbnail(message.from_user.id)
     
     if batch_temp.IS_BATCH.get(message.from_user.id):
          # Cleanup if cancelled during gap
@@ -612,23 +618,29 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
     try:
         if "Document" == msg_type:
-            try:
-                ph_path = await (acc if acc else client).download_media(msg.document.thumbs[0].file_id)
-            except:
-                ph_path = None
-            await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
+            ph_path = None
+            if not effective_thumb:
+                try:
+                    ph_path = await (acc if acc else client).download_media(msg.document.thumbs[0].file_id)
+                except:
+                    ph_path = None
+            thumb_to_use = effective_thumb or ph_path
+            await client.send_document(chat, file, thumb=thumb_to_use, caption=caption, reply_to_message_id=message.id,
                                        parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                        progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Video" == msg_type:
-            try:
-                ph_path = await (acc if acc else client).download_media(msg.video.thumbs[0].file_id)
-            except:
-                ph_path = None
+            ph_path = None
+            if not effective_thumb:
+                try:
+                    ph_path = await (acc if acc else client).download_media(msg.video.thumbs[0].file_id)
+                except:
+                    ph_path = None
+            thumb_to_use = effective_thumb or ph_path
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
-                                    height=msg.video.height, thumb=ph_path, caption=caption,
+                                    height=msg.video.height, thumb=thumb_to_use, caption=caption,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
@@ -650,11 +662,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                                     progress_args=[message, "up"])
 
         elif "Audio" == msg_type:
-            try:
-                ph_path = await (acc if acc else client).download_media(msg.audio.thumbs[0].file_id)
-            except:
-                ph_path = None
-            await client.send_audio(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
+            ph_path = None
+            if not effective_thumb:
+                try:
+                    ph_path = await (acc if acc else client).download_media(msg.audio.thumbs[0].file_id)
+                except:
+                    ph_path = None
+            thumb_to_use = effective_thumb or ph_path
+            await client.send_audio(chat, file, thumb=thumb_to_use, caption=caption, reply_to_message_id=message.id,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                     progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
