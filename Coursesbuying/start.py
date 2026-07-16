@@ -9,7 +9,6 @@ import asyncio
 import random
 import time
 import shutil
-import re
 import pyrogram
 from pyrogram import Client, filters, enums
 from pyrogram.errors import (
@@ -17,11 +16,12 @@ from pyrogram.errors import (
     InviteHashExpired, UsernameNotOccupied, AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from urllib.parse import unquote
 from config import API_ID, API_HASH, ERROR_MESSAGE
 from database.db import db
 import math
 from Coursesbuying.strings import HELP_TXT, COMMANDS_TXT
+from Coursesbuying.link_utils import parse_reference_text
+from Coursesbuying.runtime_state import BATCH_WAITING_USERS
 from logger import LOGGER
 
 def humanbytes(size):
@@ -52,82 +52,14 @@ def TimeFormatter(milliseconds: int) -> str:
 
 logger = LOGGER(__name__)
 
-BOT_DEEPLINK_RE = re.compile(r'^(?:https?://)?t\.me/[^/?]+\?start=(?P<payload>.+)$', re.I)
-PUBLIC_LINK_RE = re.compile(r'^(?:https?://)?t\.me/(?P<chat>[A-Za-z0-9_]+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
-PRIVATE_LINK_RE = re.compile(r'^(?:https?://)?t\.me/c/(?P<chat>\d+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
-BATCH_LINK_RE = re.compile(r'^(?:https?://)?t\.me/b/(?P<chat>[A-Za-z0-9_]+)/(?P<start>\d+)(?:-(?P<end>\d+))?(?:\?single)?$', re.I)
-SHORT_RANGE_RE = re.compile(r'^(?P<start>\d+)(?:-(?P<end>\d+))?$', re.I)
-
 class batch_temp(object):
     IS_BATCH = {}
 
 
-def _normalize_reference_text(text: str) -> str:
-    text = unquote((text or '').strip())
-    text = text.replace('https://', '').replace('http://', '')
-    if text.startswith('telegram.me/'):
-        text = 't.me/' + text[len('telegram.me/'):]
-    return text
-
-
 async def _resolve_reference(message: Message, text: str):
     """Resolve deep links, public/private Telegram links, and short bulk ranges."""
-    normalized = _normalize_reference_text(text)
-
-    deep_link = BOT_DEEPLINK_RE.match(normalized)
-    if deep_link:
-        normalized = _normalize_reference_text(deep_link.group('payload'))
-
-    if normalized.startswith('t.me/'):
-        normalized = normalized[5:]
-
-    match = PRIVATE_LINK_RE.match(f't.me/{normalized}')
-    if match:
-        start_id = int(match.group('start'))
-        end_id = int(match.group('end') or match.group('start'))
-        return {
-            'kind': 'private',
-            'chat': int(f"-100{match.group('chat')}"),
-            'start': start_id,
-            'end': end_id,
-        }
-
-    match = BATCH_LINK_RE.match(f't.me/{normalized}')
-    if match:
-        start_id = int(match.group('start'))
-        end_id = int(match.group('end') or match.group('start'))
-        return {
-            'kind': 'batch',
-            'chat': match.group('chat'),
-            'start': start_id,
-            'end': end_id,
-        }
-
-    match = PUBLIC_LINK_RE.match(f't.me/{normalized}')
-    if match:
-        start_id = int(match.group('start'))
-        end_id = int(match.group('end') or match.group('start'))
-        return {
-            'kind': 'public',
-            'chat': match.group('chat'),
-            'start': start_id,
-            'end': end_id,
-        }
-
-    match = SHORT_RANGE_RE.match(normalized)
-    if match:
-        last_chat = await db.get_last_chat(message.from_user.id)
-        if last_chat:
-            start_id = int(match.group('start'))
-            end_id = int(match.group('end') or match.group('start'))
-            return {
-                'kind': last_chat.get('kind', 'public'),
-                'chat': last_chat.get('chat'),
-                'start': start_id,
-                'end': end_id,
-            }
-
-    return None
+    last_chat = await db.get_last_chat(message.from_user.id)
+    return parse_reference_text(text, last_chat=last_chat)
 
 
 async def _process_reference(client: Client, message: Message, reference: dict):
@@ -325,7 +257,7 @@ async def send_start(client: Client, message: Message):
         await db.add_user(message.from_user.id, message.from_user.first_name)
 
     if len(message.command) > 1:
-        payload = unquote(" ".join(message.command[1:]).strip())
+        payload = " ".join(message.command[1:]).strip()
         reference = await _resolve_reference(message, payload)
         if reference:
             processed = await _process_reference(client, message, reference)
@@ -398,6 +330,9 @@ async def send_cancel(client: Client, message: Message):
 
 @Client.on_message(filters.text & filters.private & ~filters.regex("^/"))
 async def save(client: Client, message: Message):
+    if message.from_user and message.from_user.id in BATCH_WAITING_USERS:
+        return
+
     reference = await _resolve_reference(message, message.text)
     if reference:
         await _process_reference(client, message, reference)

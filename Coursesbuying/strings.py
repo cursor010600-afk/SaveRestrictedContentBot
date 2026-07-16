@@ -27,7 +27,9 @@ Logout from the current session.
 <blockquote><b>📦 /batch</b>
 Bulk save messages from a channel (Public/Private).
 <i>Usage: /batch</i>
-<i>Bulk ranges keep sequence order from first message to last message.</i>
+<i>Send the range as <code>t.me/firstID-lastID</code>.</i>
+<i>Example: <code>t.me/123-130</code></i>
+<i>Messages are processed in sequence from first ID to last ID.</i>
 <i>Short ranges reuse the last resolved chat context.</i></blockquote>
 
 <blockquote><b>🛑 /cancel</b>

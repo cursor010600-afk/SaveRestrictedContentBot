@@ -13,7 +13,7 @@ An advanced Telegram bot by **Coursesbuying** designed to save restricted conten
 *   **Save Restricted Content**: Download text, media, and files from channels where saving is restricted.
 *   **Batch Mode**: Bulk download messages from a channel (Public/Private) using `/batch`.
 *   **Deep Link Support**: Supported Telegram bot deep links can be sent directly for automatic processing.
-*   **Ordered Bulk Sequence**: Bulk ranges are processed in ascending message order and can reuse the last resolved chat context.
+*   **Ordered Bulk Sequence**: Use `t.me/firstID-lastID` to process messages in sequence, and short ranges can reuse the last resolved chat context.
 *   **User Login**: Login with your Telegram account using `/login` to enable downloading capabilities.
 *   **Customization**:
     *   Set custom captions (`/set_caption`).
