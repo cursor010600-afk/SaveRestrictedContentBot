@@ -68,9 +68,15 @@ async def _get_user_word_rules(user_id: int):
     return delete_words or [], replace_words or {}
 
 
-async def _get_effective_thumbnail(user_id: int, source_thumb=None):
+async def _get_effective_thumbnail_path(user_id: int, source_client, temp_dir: str, source_thumb=None):
     custom_thumb = await db.get_thumbnail(user_id)
-    return custom_thumb or source_thumb
+    if custom_thumb:
+        try:
+            os.makedirs(temp_dir, exist_ok=True)
+            return await source_client.download_media(custom_thumb, file_name=f"{temp_dir}/thumb_")
+        except Exception as e:
+            logger.error(f"Custom thumbnail download failed: {e}")
+    return source_thumb
 
 
 def _apply_word_rules(text: str, delete_words, replace_words):
@@ -605,7 +611,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         logger.error(f"Error creating upload status task: {e}")
     caption = msg.caption if msg.caption else None
     caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
-    effective_thumb = await _get_effective_thumbnail(message.from_user.id)
+    source_client = acc if acc else client
+    effective_thumb = await _get_effective_thumbnail_path(message.from_user.id, source_client, temp_dir)
     
     if batch_temp.IS_BATCH.get(message.from_user.id):
          # Cleanup if cancelled during gap
