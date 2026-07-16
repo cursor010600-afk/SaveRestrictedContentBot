@@ -4,3 +4,6 @@
 
 # Tracks users waiting to submit a single bulk range for /batch.
 BATCH_WAITING_USERS = set()
+
+# Tracks users currently being processed by batch/save handlers.
+ACTIVE_BATCH_USERS = set()

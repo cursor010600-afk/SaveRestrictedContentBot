@@ -21,7 +21,7 @@ from database.db import db
 import math
 from Coursesbuying.strings import HELP_TXT, COMMANDS_TXT
 from Coursesbuying.link_utils import parse_reference_text
-from Coursesbuying.runtime_state import BATCH_WAITING_USERS
+from Coursesbuying.runtime_state import BATCH_WAITING_USERS, ACTIVE_BATCH_USERS
 from logger import LOGGER
 
 def humanbytes(size):
@@ -62,6 +62,28 @@ async def _resolve_reference(message: Message, text: str):
     return parse_reference_text(text, last_chat=last_chat)
 
 
+async def _get_user_word_rules(user_id: int):
+    delete_words = await db.get_delete_words(user_id)
+    replace_words = await db.get_replace_words(user_id)
+    return delete_words or [], replace_words or {}
+
+
+def _apply_word_rules(text: str, delete_words, replace_words):
+    if not text:
+        return text
+
+    updated_text = text
+    for word in delete_words:
+        if word:
+            updated_text = updated_text.replace(word, "")
+
+    for target, replacement in replace_words.items():
+        if target:
+            updated_text = updated_text.replace(target, replacement)
+
+    return updated_text
+
+
 async def _process_reference(client: Client, message: Message, reference: dict):
     if not await db.is_user_exist(message.from_user.id):
         await db.add_user(message.from_user.id, message.from_user.first_name)
@@ -73,67 +95,120 @@ async def _process_reference(client: Client, message: Message, reference: dict):
 
     await db.set_last_chat(message.from_user.id, {'kind': reference['kind'], 'chat': reference['chat']})
 
-    if batch_temp.IS_BATCH.get(message.from_user.id) == False:
+    if message.from_user.id in ACTIVE_BATCH_USERS or batch_temp.IS_BATCH.get(message.from_user.id) is False:
         return await message.reply_text(
             'One Task Is Already Processing. Wait For Complete It. If You Want To Cancel This Task Then Use - /cancel'
         )
 
+    delete_words, replace_words = await _get_user_word_rules(message.from_user.id)
+    needs_login = reference['kind'] != 'public' or bool(delete_words) or bool(replace_words)
+    user_data = await db.get_session(message.from_user.id)
+    if needs_login and not user_data:
+        return await message.reply_text('**__For Downloading Restricted Content You Have To /login First.__**')
+
     batch_temp.IS_BATCH[message.from_user.id] = False
+    ACTIVE_BATCH_USERS.add(message.from_user.id)
 
     chat_ref = reference['chat']
     source_kind = reference['kind']
+    total = end_id - start_id + 1
+    sent_count = 0
+    missing_count = 0
+    error_count = 0
+    cancelled_count = 0
+    missing_ids = []
+    error_ids = []
 
-    for msgid in range(start_id, end_id + 1):
-        if batch_temp.IS_BATCH.get(message.from_user.id):
-            break
+    status_message = await message.reply_text(
+        f'<b>🚀 Batch Processing Started</b>\n\n'
+        f'<b>Total:</b> <code>{total}</code>\n'
+        f'<b>Done:</b> <code>0</code>\n'
+        f'<b>Sent:</b> <code>0</code> | <b>Missing:</b> <code>0</code> | <b>Error:</b> <code>0</code>\n'
+        f'<b>Range:</b> <code>{start_id}-{end_id}</code>',
+        parse_mode=enums.ParseMode.HTML
+    )
 
-        if source_kind == 'public':
-            try:
-                msg = await client.get_messages(chat_ref, msgid)
-                await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                await asyncio.sleep(1)
-                continue
-            except Exception as e:
-                logger.error(f"Public copy failed for {chat_ref}/{msgid}: {e}")
-
-        user_data = await db.get_session(message.from_user.id)
-        if user_data is None:
-            await message.reply('**__For Downloading Restricted Content You Have To /login First.__**')
-            batch_temp.IS_BATCH[message.from_user.id] = True
-            return
-
-        try:
+    acc = None
+    try:
+        if needs_login and user_data:
             acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
             await acc.connect()
-        except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan) as e:
-            batch_temp.IS_BATCH[message.from_user.id] = True
-            await db.set_session(message.from_user.id, None)
-            return await message.reply(f"**__Your Login Session Invalid/Expired. Please /login again.__**\nError: {e}")
-        except Exception:
-            batch_temp.IS_BATCH[message.from_user.id] = True
-            return await message.reply("**__Your Login Session Error. So /logout First Then Login Again By - /login__**")
 
-        try:
-            if source_kind == 'private':
-                await handle_private(client, acc, message, chat_ref, msgid)
-            elif source_kind == 'batch':
-                await handle_private(client, acc, message, chat_ref, msgid)
-            else:
-                await handle_private(client, acc, message, chat_ref, msgid)
-        except Exception as e:
-            logger.error(f"Error handling reference: {e}")
-            if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-        finally:
+        for index, msgid in enumerate(range(start_id, end_id + 1), start=1):
+            if batch_temp.IS_BATCH.get(message.from_user.id):
+                cancelled_count = total - index + 1
+                break
+
+            result = await handle_private(
+                client=client,
+                acc=acc,
+                message=message,
+                chatid=chat_ref,
+                msgid=msgid,
+                source_kind=source_kind,
+                delete_words=delete_words,
+                replace_words=replace_words,
+            )
+
+            result_status = result.get('status')
+            if result_status == 'sent':
+                sent_count += 1
+            elif result_status == 'missing':
+                missing_count += 1
+                missing_ids.append(msgid)
+            elif result_status == 'error':
+                error_count += 1
+                error_ids.append(msgid)
+            elif result_status == 'cancelled':
+                cancelled_count = total - index + 1
+                break
+
+            await status_message.edit_text(
+                f'<b>🚀 Batch Processing</b>\n\n'
+                f'<b>Range:</b> <code>{start_id}-{end_id}</code>\n'
+                f'<b>Progress:</b> <code>{index}/{total}</code>\n'
+                f'<b>Sent:</b> <code>{sent_count}</code> | <b>Missing:</b> <code>{missing_count}</code> | <b>Error:</b> <code>{error_count}</code>',
+                parse_mode=enums.ParseMode.HTML
+            )
+
+            await asyncio.sleep(1)
+
+        if batch_temp.IS_BATCH.get(message.from_user.id):
+            final_text = (
+                f'<b>❌ Batch Cancelled</b>\n\n'
+                f'<b>Processed:</b> <code>{sent_count + missing_count + error_count}</code>/{total}\n'
+                f'<b>Sent:</b> <code>{sent_count}</code> | <b>Missing:</b> <code>{missing_count}</code> | <b>Error:</b> <code>{error_count}</code>'
+            )
+        else:
+            final_text = (
+                f'<b>✅ Batch Completed</b>\n\n'
+                f'<b>Total:</b> <code>{total}</code>\n'
+                f'<b>Sent:</b> <code>{sent_count}</code>\n'
+                f'<b>Missing:</b> <code>{missing_count}</code>\n'
+                f'<b>Error:</b> <code>{error_count}</code>'
+            )
+
+            if missing_ids:
+                final_text += f"\n<b>Missing IDs:</b> <code>{', '.join(map(str, missing_ids[:15]))}</code>"
+            if error_ids:
+                final_text += f"\n<b>Error IDs:</b> <code>{', '.join(map(str, error_ids[:15]))}</code>"
+
+        await status_message.edit_text(final_text, parse_mode=enums.ParseMode.HTML)
+        return {
+            'status': 'cancelled' if batch_temp.IS_BATCH.get(message.from_user.id) else 'done',
+            'sent': sent_count,
+            'missing': missing_count,
+            'errors': error_count,
+            'total': total,
+        }
+    finally:
+        ACTIVE_BATCH_USERS.discard(message.from_user.id)
+        batch_temp.IS_BATCH[message.from_user.id] = True
+        if acc:
             try:
                 await acc.disconnect()
             except Exception:
                 pass
-
-        await asyncio.sleep(3)
-
-    batch_temp.IS_BATCH[message.from_user.id] = True
-    return True
 
 # -------------------
 # Supported Telegram Reactions
@@ -321,8 +396,15 @@ async def send_help(client: Client, message: Message):
 
 @Client.on_message(filters.command(["cancel"]))
 async def send_cancel(client: Client, message: Message):
-    batch_temp.IS_BATCH[message.from_user.id] = True
-    await message.reply_text("❌ Batch Process Cancelled Successfully.")
+    user_id = message.from_user.id
+    if user_id in ACTIVE_BATCH_USERS or batch_temp.IS_BATCH.get(user_id) is False:
+        batch_temp.IS_BATCH[user_id] = True
+        await message.reply_text("❌ Batch Process Cancelled Successfully.")
+    elif user_id in BATCH_WAITING_USERS:
+        BATCH_WAITING_USERS.discard(user_id)
+        await message.reply_text("❌ Batch prompt cancelled successfully.")
+    else:
+        await message.reply_text("❌ No Active Batch Process To Cancel.")
 
 # -------------------
 # Handle incoming messages
@@ -341,14 +423,19 @@ async def save(client: Client, message: Message):
 # Handle private content
 # -------------------
 
-async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
+async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int, source_kind: str, delete_words=None, replace_words=None):
+    delete_words = delete_words or []
+    replace_words = replace_words or {}
     try:
-        msg: Message = await acc.get_messages(chatid, msgid)
+        if acc:
+            msg: Message = await acc.get_messages(chatid, msgid)
+        else:
+            msg: Message = await client.get_messages(chatid, msgid)
     except (AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan) as e:
         batch_temp.IS_BATCH[message.from_user.id] = True
         await db.set_session(message.from_user.id, None)
         await client.send_message(message.chat.id, f"Session Token Invalid/Expired. Please /login again.\nError: {e}")
-        return
+        return {"status": "error"}
     except Exception as e:
         # Handle PeerIdInvalid (which might come as generic Exception or RPCError)
         # We try to refresh dialogs to learn about the peer.
@@ -365,33 +452,46 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             return
         except Exception as e2:
             logger.error(f"Retry failed: {e2}")
-            return
+            return {"status": "error"}
 # Coursesbuying
 # Don't Remove Credit
 # Telegram Channel @Coursesbuying
 
     if msg.empty:
-        return
+        return {"status": "missing"}
 
     msg_type = get_message_type(msg)
     if not msg_type:
-        return
+        return {"status": "missing"}
 
     chat = message.chat.id
     if batch_temp.IS_BATCH.get(message.from_user.id):
-        return
+        return {"status": "cancelled"}
+
+    if source_kind == 'public' and not acc:
+        try:
+            await client.copy_message(chat, msg.chat.id, msg.id, reply_to_message_id=message.id)
+            return {"status": "sent"}
+        except Exception as e:
+            logger.error(f"Error copying public message: {e}")
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id,
+                                          parse_mode=enums.ParseMode.HTML)
+            return {"status": "error"}
 
     if "Text" == msg_type:
         try:
-            await client.send_message(chat, f"**__{msg.text}__**", entities=msg.entities, reply_to_message_id=message.id,
-                                      parse_mode=enums.ParseMode.HTML)
-            return
+            text = _apply_word_rules(msg.text or "", delete_words, replace_words)
+            if not text.strip():
+                return {"status": "missing"}
+            await client.send_message(chat, text, reply_to_message_id=message.id)
+            return {"status": "sent"}
         except Exception as e:
             logger.error(f"Error sending text message: {e}")
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id,
                                           parse_mode=enums.ParseMode.HTML)
-            return
+            return {"status": "error"}
 
     smsg = await client.send_message(message.chat.id, '**__Downloading 🚀__**', reply_to_message_id=message.id)
     
@@ -409,7 +509,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         
     try:
         # Download into unique directory (folder path must end with / for Pyrogram)
-        file = await acc.download_media(msg, file_name=f"{temp_dir}/", progress=progress, progress_args=[message, "down"])
+        source_client = acc if acc else client
+        file = await source_client.download_media(msg, file_name=f"{temp_dir}/", progress=progress, progress_args=[message, "down"])
         if os.path.exists(f'{message.id}downstatus.txt'):
             os.remove(f'{message.id}downstatus.txt')
     except Exception as e:
@@ -442,7 +543,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         if ERROR_MESSAGE:
             await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id,
                                       parse_mode=enums.ParseMode.HTML)
-        return await smsg.delete()
+        await smsg.delete()
+        return {"status": "error"}
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
         # Cleanup if cancelled during gap
@@ -451,13 +553,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 shutil.rmtree(temp_dir)
             except:
                 pass
-        return
+        return {"status": "cancelled"}
 
     try:
         asyncio.create_task(upstatus(client, f'{message.id}upstatus.txt', smsg, chat))
     except Exception as e:
         logger.error(f"Error creating upload status task: {e}")
     caption = msg.caption if msg.caption else None
+    caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
     
     if batch_temp.IS_BATCH.get(message.from_user.id):
          # Cleanup if cancelled during gap
@@ -471,7 +574,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     try:
         if "Document" == msg_type:
             try:
-                ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
+                ph_path = await (acc if acc else client).download_media(msg.document.thumbs[0].file_id)
             except:
                 ph_path = None
             await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
@@ -482,7 +585,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         elif "Video" == msg_type:
             try:
-                ph_path = await acc.download_media(msg.video.thumbs[0].file_id)
+                ph_path = await (acc if acc else client).download_media(msg.video.thumbs[0].file_id)
             except:
                 ph_path = None
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
@@ -493,19 +596,19 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 os.remove(ph_path)
 
         elif "Animation" == msg_type:
-            await client.send_animation(chat, file, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_animation(chat, file, caption=caption, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
         elif "Sticker" == msg_type:
             await client.send_sticker(chat, file, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
         elif "Voice" == msg_type:
-            await client.send_voice(chat, file, caption=caption, caption_entities=msg.caption_entities,
+            await client.send_voice(chat, file, caption=caption,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
                                     progress=progress, progress_args=[message, "up"])
 
         elif "Audio" == msg_type:
             try:
-                ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
+                ph_path = await (acc if acc else client).download_media(msg.audio.thumbs[0].file_id)
             except:
                 ph_path = None
             await client.send_audio(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id,
@@ -532,7 +635,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                     shutil.rmtree(temp_dir)
                 except:
                     pass
-            return await smsg.edit("❌ **Task Cancelled**")
+            await smsg.edit("❌ **Task Cancelled**")
+            return {"status": "cancelled"}
 
         logger.error(f"Error sending media: {e}")
         if ERROR_MESSAGE:
@@ -550,6 +654,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             pass
 
     await client.delete_messages(message.chat.id, [smsg.id])
+    return {"status": "sent"}
 
 #-------------------
 # Get message type

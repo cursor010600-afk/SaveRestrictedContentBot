@@ -5,7 +5,7 @@ from pyrogram.errors import FloodWait
 from config import API_ID, API_HASH
 from database.db import db
 from Coursesbuying.link_utils import parse_reference_text
-from Coursesbuying.runtime_state import BATCH_WAITING_USERS
+from Coursesbuying.runtime_state import BATCH_WAITING_USERS, ACTIVE_BATCH_USERS
 from Coursesbuying.start import _process_reference, batch_temp
 from logger import LOGGER
 
@@ -70,5 +70,8 @@ async def cancel_batch_cmd(client: Client, message: Message):
         BATCH_WAITING_USERS.discard(user_id)
         batch_temp.IS_BATCH[user_id] = True
         await message.reply_text("<b>❌ Batch Process Cancelled Successfully.</b>", parse_mode=enums.ParseMode.HTML)
+    elif user_id in ACTIVE_BATCH_USERS or batch_temp.IS_BATCH.get(user_id) is False:
+        batch_temp.IS_BATCH[user_id] = True
+        await message.reply_text("<b>❌ Running batch cancelled successfully.</b>", parse_mode=enums.ParseMode.HTML)
     else:
         await message.reply_text("<b>❌ No Active Batch Process To Cancel.</b>", parse_mode=enums.ParseMode.HTML)

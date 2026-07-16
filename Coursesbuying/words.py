@@ -27,7 +27,7 @@ async def rem_del_word(client: Client, message: Message):
 # Don't Remove Credit
 # Telegram Channel @Coursesbuying
 
-@Client.on_message(filters.command("set_repl_word") & filters.private)
+@Client.on_message(filters.command(["set_repl_word", "set_rep_word"]) & filters.private)
 async def set_repl_word(client: Client, message: Message):
     # Syntax: /set_repl_word target replacement
     if len(message.command) < 3:
@@ -39,7 +39,7 @@ async def set_repl_word(client: Client, message: Message):
     await db.set_replace_words(message.from_user.id, {target: replacement})
     await message.reply_text(f"**Set replacement:** `{target}` -> `{replacement}`")
 
-@Client.on_message(filters.command("rem_repl_word") & filters.private)
+@Client.on_message(filters.command(["rem_repl_word", "rem_rep_word"]) & filters.private)
 async def rem_repl_word(client: Client, message: Message):
     if len(message.command) < 2:
          return await message.reply_text("**Usage:** `/rem_repl_word target`")

@@ -74,11 +74,13 @@ Remove words from the auto-delete list.
 
 <blockquote><b>📝 /set_repl_word</b>
 Set words to auto-replace in filenames/captions.
-<i>Usage: /set_repl_word target replacement</i></blockquote>
+<i>Usage: /set_repl_word target replacement</i>
+<i>Alias: /set_rep_word target replacement</i></blockquote>
 
 <blockquote><b>❌ /rem_repl_word</b>
 Remove a replacement word pair.
-<i>Usage: /rem_repl_word target</i></blockquote>
+<i>Usage: /rem_repl_word target</i>
+<i>Alias: /rem_rep_word target</i></blockquote>
 
 <blockquote><b>💎 /myplan</b>
 Check your current plan status (Free/Premium).
