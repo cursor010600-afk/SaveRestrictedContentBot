@@ -312,28 +312,43 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             parse_mode=enums.ParseMode.HTML
         )
 
-        await asyncio.sleep(3)
+        # ── Poll until the bot goes idle ──────────────────────────
+        collected = []
+        highest_seen = sent_id
+        idle_polls = 0
+        MAX_IDLE = 5  # stop after ~15 s without new messages
 
-        new_messages = []
-        async for msg in acc.get_chat_history(bot_chat_id, limit=50):
-            if msg.id <= sent_id:
+        while idle_polls < MAX_IDLE:
+            if batch_temp.IS_BATCH.get(user_id):
                 break
-            if msg.outgoing:
-                continue
-            new_messages.append(msg)
-        new_messages.reverse()
 
-        if not new_messages:
             await asyncio.sleep(3)
-            async for msg in acc.get_chat_history(bot_chat_id, limit=50):
-                if msg.id <= sent_id:
+
+            new_batch = []
+            async for msg in acc.get_chat_history(bot_chat_id, limit=200):
+                if msg.id <= highest_seen:
                     break
                 if msg.outgoing:
                     continue
-                new_messages.append(msg)
-            new_messages.reverse()
+                new_batch.append(msg)
 
-        if not new_messages:
+            if new_batch:
+                new_batch.reverse()
+                collected.extend(new_batch)
+                highest_seen = max(m.id for m in new_batch)
+                idle_polls = 0
+
+                await status_message.edit_text(
+                    f'<b>📥 Bot Deep Link — Receiving …</b>\n\n'
+                    f'<b>Target:</b> @{bot_username}\n'
+                    f'<b>Collected so far:</b> {len(collected)} message(s)\n'
+                    f'<b>Status:</b> waiting for more …',
+                    parse_mode=enums.ParseMode.HTML
+                )
+            else:
+                idle_polls += 1
+
+        if not collected:
             await status_message.edit_text(
                 f'<b>⚠️ No response from @{bot_username}</b>\n\n'
                 f'The bot did not send any messages after /start {payload}.',
@@ -341,7 +356,7 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             )
             return
 
-        total = len(new_messages)
+        total = len(collected)
         sent_count = 0
         error_count = 0
 
@@ -353,7 +368,7 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             parse_mode=enums.ParseMode.HTML
         )
 
-        for i, bot_msg in enumerate(new_messages, start=1):
+        for i, bot_msg in enumerate(collected, start=1):
             if batch_temp.IS_BATCH.get(user_id):
                 break
 
