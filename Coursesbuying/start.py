@@ -319,13 +319,6 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
         sent_count = 0
         error_count = 0
 
-        await status_message.edit_text(
-            f'<b>🤖 Bot Deep Link</b>\n\n'
-            f'<b>Target:</b> @{bot_username}\n'
-            f'<b>Status:</b> Waiting for response …',
-            parse_mode=enums.ParseMode.HTML
-        )
-
         while idle_polls < MAX_IDLE:
             if batch_temp.IS_BATCH.get(user_id):
                 break
