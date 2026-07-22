@@ -40,17 +40,43 @@ async def commands_list(client: Client, message: Message):
 @Client.on_message(filters.command("setchat") & filters.private)
 async def setchat(client: Client, message: Message):
     if len(message.command) < 2:
-        return await message.reply_text("**Usage:** `/setchat chat_id`\n\nSet the chat ID where you want your dumps to go.")
-# Coursesbuying
-# Don't Remove Credit
-# Telegram Channel @Coursesbuying
+        return await message.reply_text(
+            "**Usage:** `/setchat chat_id` or `/setchat @channel_username`\n\n"
+            "Set the chat where your saved content will be sent.\n"
+            "You can use a numeric chat ID or a @username for public channels/groups."
+        )
     
+    raw = message.command[1]
+    
+    # If it's a @username, resolve it
+    if raw.startswith('@'):
+        username = raw[1:]
+        try:
+            chat = await client.get_chat(username)
+            chat_id = chat.id
+            chat_title = chat.title or chat.first_name or username
+            chat_type = "channel" if chat.type in (enums.ChatType.CHANNEL,) else "group"
+            await db.set_dump_chat(message.from_user.id, chat_id)
+            await message.reply_text(
+                f"**Dump Chat Set Successfully ✅**\n\n"
+                f"**{chat_type.title()}:** {chat_title}\n"
+                f"**Username:** @{username}\n"
+                f"**Chat ID:** `{chat_id}`"
+            )
+        except Exception as e:
+            await message.reply_text(f"**Could not resolve @{username}.**\n\nMake sure the bot is a member of that chat.\nError: {e}")
+        return
+    
+    # Numeric chat ID
     try:
-        chat_id = int(message.command[1])
+        chat_id = int(raw)
         await db.set_dump_chat(message.from_user.id, chat_id)
         await message.reply_text(f"**Dump Chat Set Successfully ✅**\n\n**Chat ID:** `{chat_id}`")
     except ValueError:
-        await message.reply_text("**Invalid Chat ID.**")
+        await message.reply_text(
+            "**Invalid input.**\n\n"
+            "Use a numeric chat ID like `-100123456789` or a @username like `@mychannel`."
+        )
     except Exception as e:
         await message.reply_text(f"Error: {e}")
 

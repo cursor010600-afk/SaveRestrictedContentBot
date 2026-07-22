@@ -172,6 +172,8 @@ async def _process_reference(client: Client, message: Message, reference: dict):
             acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
             await acc.connect()
 
+        dump_chat_id = await db.get_dump_chat(message.from_user.id)
+
         for index, msgid in enumerate(range(start_id, end_id + 1), start=1):
             if batch_temp.IS_BATCH.get(message.from_user.id):
                 cancelled_count = total - index + 1
@@ -186,6 +188,7 @@ async def _process_reference(client: Client, message: Message, reference: dict):
                 source_kind=source_kind,
                 delete_words=delete_words,
                 replace_words=replace_words,
+                dump_chat_id=dump_chat_id,
             )
 
             result_status = result.get('status')
@@ -268,6 +271,7 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
         return await message.reply_text('**__For Downloading Restricted Content You Have To /login First.__**')
 
     delete_words, replace_words = await _get_user_word_rules(user_id)
+    dump_chat_id = await db.get_dump_chat(user_id)
 
     batch_temp.IS_BATCH[user_id] = False
     ACTIVE_BATCH_USERS.add(user_id)
@@ -361,6 +365,7 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
                     source_kind='private',
                     delete_words=delete_words,
                     replace_words=replace_words,
+                    dump_chat_id=dump_chat_id,
                 )
 
                 result_status = result.get('status') if isinstance(result, dict) else None
@@ -632,7 +637,7 @@ async def save(client: Client, message: Message):
 # Handle private content
 # -------------------
 
-async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int, source_kind: str, delete_words=None, replace_words=None):
+async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int, source_kind: str, delete_words=None, replace_words=None, dump_chat_id=None):
     delete_words = delete_words or []
     replace_words = replace_words or {}
     try:
@@ -674,12 +679,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         return {"status": "missing"}
 
     chat = message.chat.id
+    target_chat = dump_chat_id or chat
+    reply_to = message.id if not dump_chat_id else None
     if batch_temp.IS_BATCH.get(message.from_user.id):
         return {"status": "cancelled"}
 
     if source_kind == 'public' and not acc:
         try:
-            await client.copy_message(chat, msg.chat.id, msg.id, reply_to_message_id=message.id)
+            await client.copy_message(target_chat, msg.chat.id, msg.id, reply_to_message_id=reply_to)
             return {"status": "sent"}
         except Exception as e:
             logger.error(f"Error copying public message: {e}")
@@ -696,17 +703,17 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             reply_markup = _build_reply_markup(msg)
             if text == (msg.text or "") and getattr(msg, 'entities', None):
                 await client.send_message(
-                    chat,
+                    target_chat,
                     text,
                     entities=msg.entities,
-                    reply_to_message_id=message.id,
+                    reply_to_message_id=reply_to,
                     reply_markup=reply_markup,
                 )
             else:
                 await client.send_message(
-                    chat,
+                    target_chat,
                     text,
-                    reply_to_message_id=message.id,
+                    reply_to_message_id=reply_to,
                     reply_markup=reply_markup,
                 )
             return {"status": "sent"}
@@ -809,9 +816,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 except:
                     ph_path = None
             thumb_to_use = effective_thumb or ph_path
-            await client.send_document(chat, file, thumb=thumb_to_use, caption=caption,
+            await client.send_document(target_chat, file, thumb=thumb_to_use, caption=caption,
                                        caption_entities=caption_entities,
-                                       reply_to_message_id=message.id,
+                                       reply_to_message_id=reply_to,
                                        parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                        progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
@@ -825,27 +832,28 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 except:
                     ph_path = None
             thumb_to_use = effective_thumb or ph_path
-            await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
+            await client.send_video(target_chat, file, duration=msg.video.duration, width=msg.video.width,
                                     height=msg.video.height, thumb=thumb_to_use, caption=caption,
                                     caption_entities=caption_entities,
-                                    reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
+                                    reply_to_message_id=reply_to, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Animation" == msg_type:
-            await client.send_animation(chat, file, caption=caption, caption_entities=caption_entities,
-                                        reply_to_message_id=message.id,
+            await client.send_animation(target_chat, file, caption=caption, caption_entities=caption_entities,
+                                        reply_to_message_id=reply_to,
                                         parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
 
         elif "Sticker" == msg_type:
-            await client.send_sticker(chat, file, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
-                                       reply_markup=_build_reply_markup(msg))
+            await client.send_sticker(target_chat, file, reply_to_message_id=reply_to,
+                                      parse_mode=enums.ParseMode.HTML,
+                                      reply_markup=_build_reply_markup(msg))
 
         elif "Voice" == msg_type:
-            await client.send_voice(chat, file, caption=caption, caption_entities=caption_entities,
-                                    reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
+            await client.send_voice(target_chat, file, caption=caption, caption_entities=caption_entities,
+                                    reply_to_message_id=reply_to, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
 
@@ -857,17 +865,17 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 except:
                     ph_path = None
             thumb_to_use = effective_thumb or ph_path
-            await client.send_audio(chat, file, thumb=thumb_to_use, caption=caption,
+            await client.send_audio(target_chat, file, thumb=thumb_to_use, caption=caption,
                                     caption_entities=caption_entities,
-                                    reply_to_message_id=message.id,
+                                    reply_to_message_id=reply_to,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                     progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Photo" == msg_type:
-            await client.send_photo(chat, file, caption=caption, caption_entities=caption_entities,
-                                    reply_to_message_id=message.id,
+            await client.send_photo(target_chat, file, caption=caption, caption_entities=caption_entities,
+                                    reply_to_message_id=reply_to,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
     except Exception as e:
         # Check if cancelled (flag is True) or exception message contains "Cancelled"
