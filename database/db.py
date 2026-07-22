@@ -109,7 +109,10 @@ class Database:
 
     # Dump Chat Support
     async def set_dump_chat(self, id, chat_id):
-        await self.col.update_one({'id': int(id)}, {'$set': {'dump_chat': int(chat_id)}})
+        if chat_id is None:
+            await self.col.update_one({'id': int(id)}, {'$unset': {'dump_chat': ''}})
+        else:
+            await self.col.update_one({'id': int(id)}, {'$set': {'dump_chat': int(chat_id)}})
 
     async def get_dump_chat(self, id):
         user = await self.col.find_one({'id': int(id)})
