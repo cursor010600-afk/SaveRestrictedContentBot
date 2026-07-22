@@ -123,6 +123,9 @@ async def _process_reference(client: Client, message: Message, reference: dict):
     if not await db.is_user_exist(message.from_user.id):
         await db.add_user(message.from_user.id, message.from_user.first_name)
 
+    if reference['kind'] == 'bot_deeplink':
+        return await _handle_bot_deeplink(client, message, reference)
+
     start_id = reference['start']
     end_id = reference['end']
     if start_id > end_id:
@@ -249,6 +252,176 @@ async def _process_reference(client: Client, message: Message, reference: dict):
                 await acc.disconnect()
             except Exception:
                 pass
+
+async def _handle_bot_deeplink(client: Client, message: Message, reference: dict):
+    user_id = message.from_user.id
+    bot_username = reference['bot']
+    payload = reference['payload']
+
+    if user_id in ACTIVE_BATCH_USERS or batch_temp.IS_BATCH.get(user_id) is False:
+        return await message.reply_text(
+            'One Task Is Already Processing. Wait For Complete It. If You Want To Cancel This Task Then Use - /cancel'
+        )
+
+    user_data = await db.get_session(user_id)
+    if not user_data:
+        return await message.reply_text('**__For Downloading Restricted Content You Have To /login First.__**')
+
+    delete_words, replace_words = await _get_user_word_rules(user_id)
+
+    batch_temp.IS_BATCH[user_id] = False
+    ACTIVE_BATCH_USERS.add(user_id)
+
+    status_message = await message.reply_text(
+        f'<b>🤖 Bot Deep Link</b>\n\n'
+        f'<b>Target:</b> @{bot_username}\n'
+        f'<b>Status:</b> Connecting…',
+        parse_mode=enums.ParseMode.HTML
+    )
+
+    acc = None
+    try:
+        acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID, in_memory=True)
+        await acc.connect()
+
+        try:
+            bot_chat = await acc.get_chat(bot_username)
+        except Exception as e:
+            await status_message.edit_text(
+                f'<b>❌ Could not find bot @{bot_username}</b>\n\n<code>{e}</code>',
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+
+        bot_chat_id = bot_chat.id
+
+        await status_message.edit_text(
+            f'<b>🤖 Bot Deep Link</b>\n\n'
+            f'<b>Target:</b> @{bot_username}\n'
+            f'<b>Status:</b> Sending /start …',
+            parse_mode=enums.ParseMode.HTML
+        )
+
+        sent_cmd = await acc.send_message(bot_chat_id, f'/start {payload}')
+        sent_id = sent_cmd.id
+
+        await status_message.edit_text(
+            f'<b>🤖 Bot Deep Link</b>\n\n'
+            f'<b>Target:</b> @{bot_username}\n'
+            f'<b>Status:</b> Waiting for response …',
+            parse_mode=enums.ParseMode.HTML
+        )
+
+        await asyncio.sleep(3)
+
+        new_messages = []
+        async for msg in acc.get_chat_history(bot_chat_id, limit=50):
+            if msg.id <= sent_id:
+                break
+            if msg.outgoing:
+                continue
+            new_messages.append(msg)
+        new_messages.reverse()
+
+        if not new_messages:
+            await asyncio.sleep(3)
+            async for msg in acc.get_chat_history(bot_chat_id, limit=50):
+                if msg.id <= sent_id:
+                    break
+                if msg.outgoing:
+                    continue
+                new_messages.append(msg)
+            new_messages.reverse()
+
+        if not new_messages:
+            await status_message.edit_text(
+                f'<b>⚠️ No response from @{bot_username}</b>\n\n'
+                f'The bot did not send any messages after /start {payload}.',
+                parse_mode=enums.ParseMode.HTML
+            )
+            return
+
+        total = len(new_messages)
+        sent_count = 0
+        error_count = 0
+
+        await status_message.edit_text(
+            f'<b>🤖 Bot Deep Link — Saving …</b>\n\n'
+            f'<b>Target:</b> @{bot_username}\n'
+            f'<b>Received:</b> {total} message(s)\n'
+            f'<b>Progress:</b> <code>0/{total}</code>',
+            parse_mode=enums.ParseMode.HTML
+        )
+
+        for i, bot_msg in enumerate(new_messages, start=1):
+            if batch_temp.IS_BATCH.get(user_id):
+                break
+
+            result = await handle_private(
+                client=client,
+                acc=acc,
+                message=message,
+                chatid=bot_chat_id,
+                msgid=bot_msg.id,
+                source_kind='private',
+                delete_words=delete_words,
+                replace_words=replace_words,
+            )
+
+            result_status = result.get('status') if isinstance(result, dict) else None
+            if result_status == 'sent':
+                sent_count += 1
+            elif result_status == 'error':
+                error_count += 1
+
+            await status_message.edit_text(
+                f'<b>🤖 Bot Deep Link — Saving …</b>\n\n'
+                f'<b>Target:</b> @{bot_username}\n'
+                f'<b>Received:</b> {total} message(s)\n'
+                f'<b>Progress:</b> <code>{i}/{total}</code>\n'
+                f'<b>Sent:</b> {sent_count} | <b>Error:</b> {error_count}',
+                parse_mode=enums.ParseMode.HTML
+            )
+
+            await asyncio.sleep(1)
+
+        cancelled = batch_temp.IS_BATCH.get(user_id)
+        if cancelled:
+            final_text = (
+                f'<b>❌ Bot Deep Link Cancelled</b>\n\n'
+                f'<b>Processed:</b> {sent_count}/{total}\n'
+                f'<b>Sent:</b> {sent_count} | <b>Error:</b> {error_count}'
+            )
+        else:
+            final_text = (
+                f'<b>✅ Bot Deep Link Completed</b>\n\n'
+                f'<b>Target:</b> @{bot_username}\n'
+                f'<b>Messages:</b> {total}\n'
+                f'<b>Sent:</b> {sent_count} | <b>Error:</b> {error_count}'
+            )
+
+        await status_message.edit_text(final_text, parse_mode=enums.ParseMode.HTML)
+        return {
+            'status': 'cancelled' if cancelled else 'done',
+            'sent': sent_count,
+            'errors': error_count,
+            'total': total,
+        }
+
+    except FloodWait as e:
+        await message.reply_text(f'⏳ Rate limited. Try again in {e.value} seconds.')
+    except Exception as e:
+        logger.error(f"Bot deep link error: {e}")
+        await message.reply_text(f'❌ Error processing bot deep link: {e}')
+    finally:
+        ACTIVE_BATCH_USERS.discard(user_id)
+        batch_temp.IS_BATCH[user_id] = True
+        if acc:
+            try:
+                await acc.disconnect()
+            except Exception:
+                pass
+
 
 # -------------------
 # Supported Telegram Reactions
