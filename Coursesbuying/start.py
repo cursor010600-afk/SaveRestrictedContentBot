@@ -312,11 +312,19 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             parse_mode=enums.ParseMode.HTML
         )
 
-        # ── Poll until the bot goes idle ──────────────────────────
-        collected = []
+        # ── Poll & save messages as they arrive ────────────────────
         highest_seen = sent_id
         idle_polls = 0
-        MAX_IDLE = 5  # stop after ~15 s without new messages
+        MAX_IDLE = 5
+        sent_count = 0
+        error_count = 0
+
+        await status_message.edit_text(
+            f'<b>🤖 Bot Deep Link</b>\n\n'
+            f'<b>Target:</b> @{bot_username}\n'
+            f'<b>Status:</b> Waiting for response …',
+            parse_mode=enums.ParseMode.HTML
+        )
 
         while idle_polls < MAX_IDLE:
             if batch_temp.IS_BATCH.get(user_id):
@@ -332,73 +340,53 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
                     continue
                 new_batch.append(msg)
 
-            if new_batch:
-                new_batch.reverse()
-                collected.extend(new_batch)
-                highest_seen = max(m.id for m in new_batch)
-                idle_polls = 0
-
-                await status_message.edit_text(
-                    f'<b>📥 Bot Deep Link — Receiving …</b>\n\n'
-                    f'<b>Target:</b> @{bot_username}\n'
-                    f'<b>Collected so far:</b> {len(collected)} message(s)\n'
-                    f'<b>Status:</b> waiting for more …',
-                    parse_mode=enums.ParseMode.HTML
-                )
-            else:
+            if not new_batch:
                 idle_polls += 1
+                continue
 
-        if not collected:
+            new_batch.reverse()
+            highest_seen = max(m.id for m in new_batch)
+            idle_polls = 0
+
+            await status_message.edit_text(
+                f'<b>📥 Bot Deep Link — Saving …</b>\n\n'
+                f'<b>Target:</b> @{bot_username}\n'
+                f'<b>New:</b> +{len(new_batch)} <b>Saved so far:</b> {sent_count}',
+                parse_mode=enums.ParseMode.HTML
+            )
+
+            for bot_msg in new_batch:
+                if batch_temp.IS_BATCH.get(user_id):
+                    break
+
+                result = await handle_private(
+                    client=client,
+                    acc=acc,
+                    message=message,
+                    chatid=bot_chat_id,
+                    msgid=bot_msg.id,
+                    source_kind='private',
+                    delete_words=delete_words,
+                    replace_words=replace_words,
+                )
+
+                result_status = result.get('status') if isinstance(result, dict) else None
+                if result_status == 'sent':
+                    sent_count += 1
+                elif result_status == 'error':
+                    error_count += 1
+
+                await asyncio.sleep(1)
+
+        total = sent_count + error_count
+
+        if total == 0:
             await status_message.edit_text(
                 f'<b>⚠️ No response from @{bot_username}</b>\n\n'
                 f'The bot did not send any messages after /start {payload}.',
                 parse_mode=enums.ParseMode.HTML
             )
             return
-
-        total = len(collected)
-        sent_count = 0
-        error_count = 0
-
-        await status_message.edit_text(
-            f'<b>🤖 Bot Deep Link — Saving …</b>\n\n'
-            f'<b>Target:</b> @{bot_username}\n'
-            f'<b>Received:</b> {total} message(s)\n'
-            f'<b>Progress:</b> <code>0/{total}</code>',
-            parse_mode=enums.ParseMode.HTML
-        )
-
-        for i, bot_msg in enumerate(collected, start=1):
-            if batch_temp.IS_BATCH.get(user_id):
-                break
-
-            result = await handle_private(
-                client=client,
-                acc=acc,
-                message=message,
-                chatid=bot_chat_id,
-                msgid=bot_msg.id,
-                source_kind='private',
-                delete_words=delete_words,
-                replace_words=replace_words,
-            )
-
-            result_status = result.get('status') if isinstance(result, dict) else None
-            if result_status == 'sent':
-                sent_count += 1
-            elif result_status == 'error':
-                error_count += 1
-
-            await status_message.edit_text(
-                f'<b>🤖 Bot Deep Link — Saving …</b>\n\n'
-                f'<b>Target:</b> @{bot_username}\n'
-                f'<b>Received:</b> {total} message(s)\n'
-                f'<b>Progress:</b> <code>{i}/{total}</code>\n'
-                f'<b>Sent:</b> {sent_count} | <b>Error:</b> {error_count}',
-                parse_mode=enums.ParseMode.HTML
-            )
-
-            await asyncio.sleep(1)
 
         cancelled = batch_temp.IS_BATCH.get(user_id)
         if cancelled:
@@ -803,7 +791,10 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     except Exception as e:
         logger.error(f"Error creating upload status task: {e}")
     caption = msg.caption if msg.caption else None
+    caption_entities = msg.caption_entities if caption and msg.caption_entities else None
     caption = _apply_word_rules(caption or "", delete_words, replace_words) or None
+    if caption and caption_entities and caption != (msg.caption or ""):
+        caption_entities = None
     source_client = acc if acc else client
     effective_thumb = await _get_effective_thumbnail_path(message.from_user.id, client, temp_dir)
     
@@ -825,7 +816,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 except:
                     ph_path = None
             thumb_to_use = effective_thumb or ph_path
-            await client.send_document(chat, file, thumb=thumb_to_use, caption=caption, reply_to_message_id=message.id,
+            await client.send_document(chat, file, thumb=thumb_to_use, caption=caption,
+                                       caption_entities=caption_entities,
+                                       reply_to_message_id=message.id,
                                        parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                        progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
@@ -841,6 +834,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             thumb_to_use = effective_thumb or ph_path
             await client.send_video(chat, file, duration=msg.video.duration, width=msg.video.width,
                                     height=msg.video.height, thumb=thumb_to_use, caption=caption,
+                                    caption_entities=caption_entities,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
@@ -848,7 +842,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 os.remove(ph_path)
 
         elif "Animation" == msg_type:
-            await client.send_animation(chat, file, caption=caption, reply_to_message_id=message.id,
+            await client.send_animation(chat, file, caption=caption, caption_entities=caption_entities,
+                                        reply_to_message_id=message.id,
                                         parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
 
         elif "Sticker" == msg_type:
@@ -856,7 +851,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                                        reply_markup=_build_reply_markup(msg))
 
         elif "Voice" == msg_type:
-            await client.send_voice(chat, file, caption=caption,
+            await client.send_voice(chat, file, caption=caption, caption_entities=caption_entities,
                                     reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML,
                                     reply_markup=_build_reply_markup(msg), progress=progress,
                                     progress_args=[message, "up"])
@@ -869,14 +864,17 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 except:
                     ph_path = None
             thumb_to_use = effective_thumb or ph_path
-            await client.send_audio(chat, file, thumb=thumb_to_use, caption=caption, reply_to_message_id=message.id,
+            await client.send_audio(chat, file, thumb=thumb_to_use, caption=caption,
+                                    caption_entities=caption_entities,
+                                    reply_to_message_id=message.id,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg),
                                     progress=progress, progress_args=[message, "up"])
             if ph_path and os.path.exists(ph_path):
                 os.remove(ph_path)
 
         elif "Photo" == msg_type:
-            await client.send_photo(chat, file, caption=caption, reply_to_message_id=message.id,
+            await client.send_photo(chat, file, caption=caption, caption_entities=caption_entities,
+                                    reply_to_message_id=message.id,
                                     parse_mode=enums.ParseMode.HTML, reply_markup=_build_reply_markup(msg))
     except Exception as e:
         # Check if cancelled (flag is True) or exception message contains "Cancelled"
