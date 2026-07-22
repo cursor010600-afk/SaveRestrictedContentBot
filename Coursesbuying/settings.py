@@ -43,10 +43,16 @@ async def setchat(client: Client, message: Message):
         return await message.reply_text(
             "**Usage:** `/setchat chat_id` or `/setchat @channel_username`\n\n"
             "Set the chat where your saved content will be sent.\n"
-            "You can use a numeric chat ID or a @username for public channels/groups."
+            "You can use a numeric chat ID or a @username for public channels/groups.\n\n"
+            "**To unset/reset:** `/setchat clear` or `/setchat reset` — sends content back to your DM."
         )
     
     raw = message.command[1]
+
+    # Unset / reset
+    if raw.lower() in ('clear', 'reset', 'off', 'default'):
+        await db.set_dump_chat(message.from_user.id, None)
+        return await message.reply_text("**Dump Chat Reset ✅**\n\nContent will now be sent to your DM.")
     
     # If it's a @username, resolve it
     if raw.startswith('@'):
