@@ -316,12 +316,10 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             parse_mode=enums.ParseMode.HTML
         )
 
-        # ── Poll & save messages as they arrive ────────────────────
+        # ── Poll & wait for all messages to arrive ────────────────────
         highest_seen = sent_id
         idle_polls = 0
-        MAX_IDLE = 5
-        sent_count = 0
-        error_count = 0
+        MAX_IDLE = 10
 
         while idle_polls < MAX_IDLE:
             if batch_temp.IS_BATCH.get(user_id):
@@ -330,7 +328,7 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
             await asyncio.sleep(3)
 
             new_batch = []
-            async for msg in acc.get_chat_history(bot_chat_id, limit=200):
+            async for msg in acc.get_chat_history(bot_chat_id, limit=100):
                 if msg.id <= highest_seen:
                     break
                 if msg.outgoing:
@@ -341,42 +339,44 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
                 idle_polls += 1
                 continue
 
-            new_batch.reverse()
             highest_seen = max(m.id for m in new_batch)
             idle_polls = 0
 
             await status_message.edit_text(
-                f'<b>📥 Bot Deep Link — Saving …</b>\n\n'
+                f'<b>📥 Bot Deep Link — Receiving …</b>\n\n'
                 f'<b>Target:</b> @{bot_username}\n'
-                f'<b>New:</b> +{len(new_batch)} <b>Saved so far:</b> {sent_count}',
+                f'<b>Waiting …</b> (<code>{idle_polls}/{MAX_IDLE}</code> idle) <b>Latest:</b> {highest_seen}',
                 parse_mode=enums.ParseMode.HTML
             )
 
-            for bot_msg in new_batch:
-                if batch_temp.IS_BATCH.get(user_id):
+        if batch_temp.IS_BATCH.get(user_id):
+            return
+
+        # ── Fetch ALL messages from sent_id to highest_seen via pagination ──
+        all_messages = []
+        offset_id = 0
+        while True:
+            kwargs = {'chat_id': bot_chat_id, 'limit': 100}
+            if offset_id:
+                kwargs['offset_id'] = offset_id
+
+            page = []
+            async for msg in acc.get_chat_history(**kwargs):
+                if msg.id <= sent_id:
                     break
+                if msg.outgoing:
+                    continue
+                page.append(msg)
 
-                result = await handle_private(
-                    client=client,
-                    acc=acc,
-                    message=message,
-                    chatid=bot_chat_id,
-                    msgid=bot_msg.id,
-                    source_kind='private',
-                    delete_words=delete_words,
-                    replace_words=replace_words,
-                    dump_chat_id=dump_chat_id,
-                )
+            if not page:
+                break
 
-                result_status = result.get('status') if isinstance(result, dict) else None
-                if result_status == 'sent':
-                    sent_count += 1
-                elif result_status == 'error':
-                    error_count += 1
+            all_messages.extend(page)
+            offset_id = page[-1].id
 
-                await asyncio.sleep(1)
-
-        total = sent_count + error_count
+        # Sort by ID ascending for correct chronological order
+        all_messages.sort(key=lambda m: m.id)
+        total = len(all_messages)
 
         if total == 0:
             await status_message.edit_text(
@@ -385,6 +385,49 @@ async def _handle_bot_deeplink(client: Client, message: Message, reference: dict
                 parse_mode=enums.ParseMode.HTML
             )
             return
+
+        sent_count = 0
+        error_count = 0
+
+        await status_message.edit_text(
+            f'<b>📥 Bot Deep Link — Saving …</b>\n\n'
+            f'<b>Target:</b> @{bot_username}\n'
+            f'<b>Found:</b> {total} messages <b>Saved:</b> 0',
+            parse_mode=enums.ParseMode.HTML
+        )
+
+        for bot_msg in all_messages:
+            if batch_temp.IS_BATCH.get(user_id):
+                break
+
+            result = await handle_private(
+                client=client,
+                acc=acc,
+                message=message,
+                chatid=bot_chat_id,
+                msgid=bot_msg.id,
+                source_kind='private',
+                delete_words=delete_words,
+                replace_words=replace_words,
+                dump_chat_id=dump_chat_id,
+            )
+
+            result_status = result.get('status') if isinstance(result, dict) else None
+            if result_status == 'sent':
+                sent_count += 1
+            elif result_status == 'error':
+                error_count += 1
+
+            if (sent_count + error_count) % 5 == 0:
+                await status_message.edit_text(
+                    f'<b>📥 Bot Deep Link — Saving …</b>\n\n'
+                    f'<b>Target:</b> @{bot_username}\n'
+                    f'<b>Progress:</b> {sent_count + error_count}/{total}\n'
+                    f'<b>Sent:</b> {sent_count} | <b>Error:</b> {error_count}',
+                    parse_mode=enums.ParseMode.HTML
+                )
+
+            await asyncio.sleep(1)
 
         cancelled = batch_temp.IS_BATCH.get(user_id)
         if cancelled:
